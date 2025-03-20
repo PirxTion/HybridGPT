@@ -71,8 +71,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln1(x)) # normalize before self-attention, not after
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.attn(self.ln_1(x)) # normalize before self-attention, not after
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 class GPT(nn.Module):
@@ -148,21 +148,46 @@ class GPT(nn.Module):
         return model
 
 model = GPT.from_pretrained('gpt2')
-print("didn't crash")
+# print("didn't crash")
+
+# Example usage
+num_return_sequences = 5
+max_length = 30
+
+model = GPT(GPTConfig())
+model.eval()
+model.to('mps')
+
+# prefix tokens
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I'm a language model,")
+tokens = torch.tensor(tokens, dtype=torch.long)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+x = tokens.to('mps')
+
+# generate, x (B, T) with B=5, T=6
+# torch.manual_seed(42)
+# torch.mps.manual_seed(42)
+while x.size(1) < max_length:
+    # forward pass
+    with torch.no_grad():
+        logits = model(x) # (B, T, vocab_size)
+    # take the logits at the last position
+    logits = logits[:, -1, :] # (B, vocab_size)
+    # get the probabilities
+    probs = F.softmax(logits, dim=-1) # (B, vocab_size)
+    # do top-50 sampling
+    topk_probs, topk_idx = torch.topk(probs, 50, dim=-1) # (B, 50)
+    # select a token from the top-k tokens
+    ix = torch.multinomial(topk_probs, num_samples=1) # (B, 1)
+    # gather the corresponding indices
+    xcol = torch.gather(topk_idx, -1, ix) # (B, 1)
+    # append to the sequence
+    x = torch.cat((x, xcol), dim=1) # (B, T+1)
 
 
-
-
-        
-        
-
-# # Example usage
-# num_return_sequences = 5
-# max_length = 30
-
-# model = GPT(GPTConfig())
-# model.eval()
-# model.to('cuda')
-
-# import tiktoken
-# tokenizer = tiktokens.Tokenizer('gpt2')
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens) 
+    print(decoded)
