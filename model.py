@@ -147,6 +147,15 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
         return model
 
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.mps.is_available() and hasattr(torch.backends, "mps"):
+    device = "mps"
+print("device:", device)
+
+
+
 model = GPT.from_pretrained('gpt2')
 # print("didn't crash")
 
@@ -156,7 +165,7 @@ max_length = 30
 
 model = GPT(GPTConfig())
 model.eval()
-model.to('mps')
+model.to(device)
 
 # prefix tokens
 import tiktoken
@@ -164,11 +173,13 @@ enc = tiktoken.get_encoding('gpt2')
 tokens = enc.encode("Hello, I'm a language model,")
 tokens = torch.tensor(tokens, dtype=torch.long)
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
-x = tokens.to('mps')
+x = tokens.to(device)
+
 
 # generate, x (B, T) with B=5, T=6
-# torch.manual_seed(42)
-# torch.mps.manual_seed(42)
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+torch.mps.manual_seed(42)
 while x.size(1) < max_length:
     # forward pass
     with torch.no_grad():
