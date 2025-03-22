@@ -34,7 +34,7 @@ enc = tiktoken.get_encoding('gpt2')
 
 from dataloader import DataLoaderLite
 train_loader = DataLoaderLite(B=16, T=1024)
-torch.set_float32_matmul_preision('high')
+torch.set_float32_matmul_precision('high')
 
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig())
