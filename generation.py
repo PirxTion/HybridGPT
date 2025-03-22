@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from model import GPT, GPTConfig
 import time
-import torch._dynamo
+from transformers import get_cosine_schedule_with_warmup
 
 device = "cpu"
 torch.manual_seed(42)
@@ -33,7 +33,6 @@ enc = tiktoken.get_encoding('gpt2')
 # y = buf[1:].view(B, T).to(device)
 
 from dataloader import DataLoaderLite
-train_loader = DataLoaderLite(B=16, T=1024)
 torch.set_float32_matmul_precision('high')
 
 # model = GPT.from_pretrained('gpt2')
@@ -42,22 +41,47 @@ model.to(device)
 # model = torch.compile(model)
 
 # optimize
-optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), eps=1e-8, lr=3e-4)
-for i in range(50):
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+training_steps = 50
+
+# optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), eps=1e-8, lr=6e-4, weight_decay=0.1, fused=True)
+optimizer = model.configure_optimizers(learning_rate=max_lr, device=device, weight_decay=0.1)
+
+scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
+
+total_batch_size = 524288 # 2**19, around 0.5M, in number of tokens
+B = 16
+T = 1024
+
+train_loader = DataLoaderLite(B=16, T=1024)
+assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B*T"
+
+grad_accum_steps = total_batch_size // (B * T)
+print(f"total_batch_size: {total_batch_size} | B: {B} | T: {T} | grad_accum_steps: {grad_accum_steps}")
+
+for step in range(training_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
+    scheduler.step()
+    lr = scheduler.get_last_lr()[0]
     torch.cuda.synchronize() # wait for the GPU finish work
     t1 = time.time()
     dt = t1-t0
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
-    print(f"step {i:4d} | loss: {loss.item():.6f} | norm:{norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1-t0)
+    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 

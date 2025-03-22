@@ -1,8 +1,8 @@
 import torch
 from dataclasses import dataclass
-import math
 import torch.nn as nn
 import torch.nn.functional as F
+import inspect
 
 @dataclass
 class GPTConfig:
@@ -109,6 +109,34 @@ class GPT(nn.Module):
             if hasattr(module, 'POSITION_SCALE_INIT'):
                 std = 0.01
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+    
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # get all parameters that require gradients
+        param_dict = {pn:p for pn, p in self.named_parameters()}
+        param_dict = {pn:p for pn, p in param_dict.items() if p.requires_grad}
+
+        # any parameters taht is 2D will be weight decayed
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0},
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+
+        print(f"number of weight decay parameters: {num_decay_params}")
+        print(f"number of no weight decay parameters: {num_nodecay_params}")
+
+        # create optimizer
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        used_fused = fused_available and device == 'cuda'
+        print(f"using fused AdamW: {used_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, betas=(0.9, 0.95), eps=1e-8, lr=learning_rate, weight_decay=weight_decay, fused=used_fused)
+        return optimizer
+
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
