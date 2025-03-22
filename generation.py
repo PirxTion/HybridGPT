@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from model import GPT, GPTConfig
 import time
+import torch._dynamo
 
 device = "cpu"
 torch.manual_seed(42)
@@ -12,7 +13,6 @@ elif torch.mps.is_available() and hasattr(torch.backends, "mps"):
     device = "mps"
     torch.mps.manual_seed(42)
 print("device:", device)
-
 
 # # prefix tokens
 import tiktoken
@@ -37,24 +37,27 @@ train_loader = DataLoaderLite(B=16, T=1024)
 torch.set_float32_matmul_precision('high')
 
 # model = GPT.from_pretrained('gpt2')
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
+# model = torch.compile(model)
 
 # optimize
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), eps=1e-8, lr=3e-4)
 for i in range(50):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     torch.cuda.synchronize() # wait for the GPU finish work
     t1 = time.time()
-    dt = (t1-t0)*1000
+    dt = t1-t0
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
-    print(f"step {i}, loss: {loss.item()}, dt: (dt:.2f)ms, tok/sec:{tokens_per_sec:.2f}")
+    print(f"step {i:4d} | loss: {loss.item():.6f} | norm:{norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 
@@ -84,7 +87,6 @@ while x.size(1) < max_length:
     xcol = torch.gather(topk_idx, -1, ix) # (B, 1)
     # append to the sequence
     x = torch.cat((x, xcol), dim=1) # (B, T+1)
-
 
 for i in range(num_return_sequences):
     tokens = x[i, :max_length].tolist()
