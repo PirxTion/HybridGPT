@@ -30,19 +30,18 @@ class CausalSelfAttention(nn.Module):
         # self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
         
     def reshape_for_broadcast(self, freqs_cis, x):
-        ndim = x.ndim
+        ndim = x.ndim # x has shape (B, T, n_head, C // n_head)
         assert 0 <= 1 < ndim
-        assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        assert freqs_cis.shape == (x.shape[1], x.shape[-1]) # match with T and hd
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)] # shape is (1, T, 1, C // n_head)
         return freqs_cis.reshape(*shape)
     
     def apply_rotary_emb(self, xq, xk, freqs_cis):
-        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2)) # (B, T, n_head, C // 2 * n_head, 2), then turned into complex number
         xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
         freqs_cis = self.reshape_for_broadcast(freqs_cis, xq_)
-        freqs_cis = freqs_cis.to(xq_.device)
         xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-        xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+        xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3) # merge the last two dimensions
         return xq_out.type_as(xq), xk_out.type_as(xk)
 
     def forward(self, x, freqs_cis):
@@ -97,15 +96,16 @@ class Block(nn.Module):
         self.freqs_cis = self.precompute_freqs_cis(config.n_embd // config.n_head, config.block_size, config.rope_theta)
 
     def forward(self, x):
+        self.freqs_cis = self.freqs_cis.to(x.device)
         x = x + self.attn(self.ln_1(x), self.freqs_cis) # normalize before self-attention, not after
         x = x + self.mlp(self.ln_2(x))
         return x
     
     def precompute_freqs_cis(self, dim, end, theta=10000.0):
-        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)) # generate list of \theta^{-2i / d}
         t = torch.arange(end, device=freqs.device, dtype=torch.float32)
-        freqs = torch.outer(t, freqs)
-        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        freqs = torch.outer(t, freqs) # multiply each position idx by each frequency, t x freqs
+        freqs_cis = torch.polar(torch.ones_like(freqs), freqs) # store each elements as complex number, get sin and cos
         return freqs_cis
 
 class GPT(nn.Module):
