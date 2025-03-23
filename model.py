@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch.nn as nn
 import torch.nn.functional as F
 import inspect
-from typing import Literal
+import numpy as np
 
 @dataclass
 class GPTConfig:
@@ -14,9 +14,9 @@ class GPTConfig:
     n_embd: int = 768 # embedding dimension
     rope_theta: float = 500000
     n_activated_experts: int = 1
-    n_routed_experts: int = 4
+    n_routed_experts: int = 8
     load_balance_alpha =  0.0001
-    bias_update_gamma = 0.001
+
 
         
 class Gate(nn.Module):
@@ -25,9 +25,11 @@ class Gate(nn.Module):
         super().__init__()
         self.dim = config.n_embd
         self.topk = config.n_activated_experts
+        self.n_routed_experts = config.n_routed_experts
+        self.n_activated_experts = config.n_activated_experts
         self.weight = nn.Linear(self.dim, config.n_routed_experts, bias=False)
-        self.bias = nn.Parameter(torch.empty(config.n_routed_experts))
-        self.bias_update_gamma = config.bias_update_gamma
+        self.bias = nn.Parameter(torch.empty(config.n_routed_experts), requires_grad=False)
+        self.f_i_accum = None
     
     def forward(self, x):
         scores = self.weight(x)
@@ -38,8 +40,14 @@ class Gate(nn.Module):
         weights = torch.gather(original_scores, 1, indices)
         expert_counts = torch.bincount(indices.flatten(), minlength=self.weight.out_features)
         expert_probs = original_scores.mean(dim=0)
+        shape = x.shape
+        T = np.prod(shape[:-1])
+        f_i = (expert_counts.float() * self.n_routed_experts) / (self.n_activated_experts * T + 1e-6)
+        if self.f_i_accum is None:
+            self.f_i_accum = torch.zeros_like(f_i)
+        self.f_i_accum += f_i
         stats = {
-            "expert_counts": expert_counts,
+            "f_i": f_i,
             "expert_probs": expert_probs
         }
         return weights.type_as(x), indices, stats
@@ -68,12 +76,8 @@ class MoE(nn.Module):
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
         z = self.shared_experts(x)
-        expert_counts = gate_stats["expert_counts"]
+        f_i = gate_stats["f_i"]
         expert_probs = gate_stats["expert_probs"]
-        T = x.size(0)
-        N_prime = self.n_routed_experts
-        K_prime = self.n_activated_experts
-        f_i = (expert_counts.float() * N_prime) / (K_prime * T + 1e-6)
         load_balance_loss = self.alpha * torch.sum(f_i * expert_probs)
         return (y + z).view(shape), load_balance_loss
 
@@ -204,7 +208,7 @@ class GPT(nn.Module):
             #     std = 0.01
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
     
-    def configure_optimizers(self, weight_decay, learning_rate, device):
+    def configure_optimizers(self, weight_decay, learning_rate, device, grad_accum_steps, bias_update_gamma):
         # get all parameters that require gradients
         param_dict = {pn:p for pn, p in self.named_parameters()}
         param_dict = {pn:p for pn, p in param_dict.items() if p.requires_grad}
@@ -212,19 +216,15 @@ class GPT(nn.Module):
         # any parameters taht is 2D will be weight decayed
         decay_params = []
         nodecay_params = []
-        moe_bias_params = []
         for pn, p in param_dict.items():
             if p.dim() >= 2:
                 decay_params.append(p)
-            elif "bias" in pn and "gate" in pn:
-                moe_bias_params.append(p)
             else:
                 nodecay_params.append(p)
 
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0},
-            {"params": moe_bias_params, "weight_decay": 0.0, "lr": 0.001},
         ]
 
         num_decay_params = sum(p.numel() for p in decay_params)
@@ -237,9 +237,17 @@ class GPT(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         used_fused = fused_available and device == 'cuda'
         print(f"using fused AdamW: {used_fused}")
-        optimizer = torch.optim.AdamW(optim_groups, betas=(0.9, 0.95), eps=1e-8, lr=learning_rate, weight_decay=weight_decay, fused=used_fused)
+        optimizer = CustomOptimizer(
+            model=self,  
+            grad_accum_steps=grad_accum_steps,
+            bias_update_gamma=bias_update_gamma,
+            params=optim_groups,
+            lr=learning_rate,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            fused=used_fused
+            )
         return optimizer
-
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
@@ -311,3 +319,26 @@ class GPT(nn.Module):
     #             with torch.no_grad():
     #                 sd[k].copy_(sd_hf[k])
     #     return model
+
+class CustomOptimizer(torch.optim.AdamW):
+        def __init__(self, model, grad_accum_steps, bias_update_gamma, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.model = model
+            self.grad_accmu_steps = grad_accum_steps
+            self.bias_update_gamma = bias_update_gamma
+
+        def step(self, closure=None):
+            super().step(closure)
+            
+            # update bias in MoE gate
+            for module in self.model.modules():
+                if isinstance(module, Gate):
+                    f_i_avg = module.f_i_accum / self.grad_accmu_steps
+                    for i in range(module.n_routed_experts):
+                        if f_i_avg[i] > 1.0:
+                            module.bias.data[i] -= self.bias_update_gamma
+                        elif f_i_avg[i] < 1.0:
+                            module.bias.data[i] += self.bias_update_gamma
+                    print(f_i_avg)
+                    # zero out f_i
+                    module.f_i_accum = None

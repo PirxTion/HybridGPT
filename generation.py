@@ -45,11 +45,9 @@ max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
 training_steps = 50
+bias_update_gamma = 0.01
 
-# optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), eps=1e-8, lr=6e-4, weight_decay=0.1, fused=True)
-optimizer = model.configure_optimizers(learning_rate=max_lr, device=device, weight_decay=0.1)
 
-scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
 
 total_batch_size = 524288 # 2**19, around 0.5M, in number of tokens
 B = 8
@@ -57,22 +55,27 @@ T = 1024
 
 train_loader = DataLoaderLite(B, T)
 assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B*T"
-
 grad_accum_steps = total_batch_size // (B * T)
+# optimizer = torch.optim.AdamW(model.parameters(), betas=(0.9, 0.95), eps=1e-8, lr=6e-4, weight_decay=0.1, fused=True)
+optimizer = model.configure_optimizers(learning_rate=max_lr, device=device, weight_decay=0.1, grad_accum_steps=grad_accum_steps, bias_update_gamma=bias_update_gamma)
+scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
 print(f"total_batch_size: {total_batch_size} | B: {B} | T: {T} | grad_accum_steps: {grad_accum_steps}")
 
 for step in range(training_steps):
     t0 = time.time()
     optimizer.zero_grad()
     loss_accum = 0.0
+    balance_loss_accum = 0.0
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss, balance_loss = model(x, y)
-        loss += balance_loss
+        balance_loss = balance_loss / grad_accum_steps
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
+        balance_loss_accum += balance_loss.detach()
+        loss += balance_loss
         loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
@@ -82,7 +85,7 @@ for step in range(training_steps):
     t1 = time.time()
     dt = t1-t0
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1-t0)
-    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | bl: {balance_loss.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
+    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | bl: {balance_loss_accum.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 
