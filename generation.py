@@ -38,7 +38,7 @@ torch.set_float32_matmul_precision('high')
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-# model = torch.compile(model)
+model = torch.compile(model)
 
 # optimize
 max_lr = 6e-4
@@ -52,10 +52,10 @@ optimizer = model.configure_optimizers(learning_rate=max_lr, device=device, weig
 scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
 
 total_batch_size = 524288 # 2**19, around 0.5M, in number of tokens
-B = 16
+B = 8
 T = 1024
 
-train_loader = DataLoaderLite(B=16, T=1024)
+train_loader = DataLoaderLite(B, T)
 assert total_batch_size % (B * T) == 0, "total_batch_size must be divisible by B*T"
 
 grad_accum_steps = total_batch_size // (B * T)
@@ -69,7 +69,8 @@ for step in range(training_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
+            logits, loss, balance_loss = model(x, y)
+        loss += balance_loss
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
         loss.backward()
@@ -81,7 +82,7 @@ for step in range(training_steps):
     t1 = time.time()
     dt = t1-t0
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / (t1-t0)
-    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
+    print(f"step {step:4d} | loss: {loss_accum.item():.6f} | bl: {balance_loss.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
 
 import sys; sys.exit(0)
 

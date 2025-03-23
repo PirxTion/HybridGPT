@@ -25,6 +25,5 @@ class DataLoaderLite:
         y = buf[1:].view(B, T)
         self.current_position += B*T
         if self.current_position + B*T + 1 >= len(self.tokens):
-            print("end of dataset")
             self.current_position = 0
         return x, y
