@@ -3,6 +3,18 @@ from dataclasses import dataclass
 import torch.nn as nn
 import torch.nn.functional as F
 import inspect
+from typing import Literal
+
+# class Linear(nn.Module):
+#     dtype = torch.bfloat16
+
+#     def __init__(self, in_features, out_features, bias = False, dtype = None):
+#         super().__init__()
+#         self.in_features = in_features
+#         self.out_features = out_features
+#         self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+#         if self.weight.element_size() == 1:
+#             scale_out_features = (out_features + block_size - 1) // block_size
 
 @dataclass
 class GPTConfig:
@@ -12,6 +24,68 @@ class GPTConfig:
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
     rope_theta: float = 500000
+    n_activated_experts: int = 1
+    n_routed_experts: int = 7
+    load_balance_alpha = 0.5
+
+        
+class Gate(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.dim = config.n_embd
+        self.topk = config.n_activated_experts
+        self.score_func = config.score_func
+        self.weight = nn.Linear(self.dim, config.n_routed_experts, bias=False)
+        self.bias = nn.Parameter(torch.empty(config.n_routed_experts))
+    
+    def forward(self, x):
+        scores = self.weight(x)
+        scores = F.softmax(scores, dim=-1, dtype=torch.float32)
+        original_scores = scores
+        scores = scores + self.bias
+        indices = torch.topk(scores, self.topk, dim=-1)[1]
+        weights = torch.gather(original_scores, 1, indices)
+        expert_counts = torch.bincount(indices.flatten(), minlength=self.weight.out_features)
+        expert_probs = original_scores.mean(dim=0)
+        stats = {
+            "expert_counts": expert_counts,
+            "expert_probs": expert_probs
+        }
+        return weights.type_as(x), indices, stats
+
+class MoE(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.n_routed_experts = config.n_routed_experts
+        self.n_activated_experts = config.n_activated_experts
+        self.gate = Gate(config)
+        self.experts = nn.ModuleList([MLP(config) for _ in range(config.n_routed_experts)])
+        self.shared_experts = MLP(config)
+        self.alpha = config.load_balance_alpha
+    
+    def forward(self, x):
+        shape = x.shape
+        x = x.view(-1, shape[-1])
+        weights, indices, gate_stats = self.gate(x)
+        y = torch.zeros_like(x)
+        counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
+        for i in range(self.n_routed_experts):
+            if counts[i] == 0:
+                continue
+            expert = self.experts[i]
+            idx, top = torch.where(indices == i)
+            y[idx] += expert(x[idx]) * weights[idx, top, None]
+        z = self.shared_experts(x)
+        expert_counts = gate_stats["expert_counts"]
+        expert_probs = gate_stats["expert_probs"]
+        T = x.size(0)
+        N_prime = self.n_routed_experts
+        K_prime = self.n_activated_experts
+        f_i = (expert_counts.float() * N_prime) / (K_prime * T + 1e-6)
+        load_balance_loss = self.alpha * torch.sum(f_i * expert_probs)
+        return (y + z).view(shape)
 
 class CausalSelfAttention(nn.Module):
 
@@ -52,7 +126,7 @@ class CausalSelfAttention(nn.Module):
         q, k, v = qkv.split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head)
         k = k.view(B, T, self.n_head, C // self.n_head)
-        q, k = self.apply_rotary_emb(q, k, freqs_cis=freqs_cis)
+        q, k = self.apply_rotary_emb(q, k, freqs_cis=freqs_cis) # apply rotary embedding
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -74,9 +148,9 @@ class MLP(nn.Module):
     
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)
+        self.c_fc = nn.Linear(config.n_embd, config.n_embd * 2)
         self.silu = nn.SiLU()
-        self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd * 2, config.n_embd)
         self.c_proj.RESIDUAL_SCALE_INIT = 1
 
     def forward(self, x):
