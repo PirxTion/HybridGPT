@@ -38,7 +38,7 @@ torch.set_float32_matmul_precision('high')
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-model = torch.compile(model)
+# model = torch.compile(model)
 
 # optimize
 max_lr = 6e-4
@@ -50,7 +50,7 @@ bias_update_gamma = 0.01
 
 
 total_batch_size = 524288 # 2**19, around 0.5M, in number of tokens
-B = 8
+B = 16
 T = 1024
 
 train_loader = DataLoaderLite(B, T)

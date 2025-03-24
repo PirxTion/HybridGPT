@@ -4,6 +4,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import inspect
 import numpy as np
+from kernel import act_quant, weight_dequant, fp8_gemm
+from typing import Literal
+
+gemm_impl: Literal["bf16", "fp8"] = "bf16"
+block_size = 64
 
 @dataclass
 class GPTConfig:
@@ -17,7 +22,40 @@ class GPTConfig:
     n_routed_experts: int = 8
     load_balance_alpha =  0.0001
 
+def linear(x, weight, bias):
+    if weight.element_size() > 1:
+        return F.linear(x, weight, bias)
+    elif gemm_impl == "bf16":
+        weight = weight_dequant(weight, weight.scale)
+        return F.linear(x, weight, bias)
+    else:
+        x, scale = act_quant(x, block_size)
+        y = fp8_gemm(x, scale, weight, weight.scale)
+        if bias is not None:
+            y += bias
+        return y
 
+class Linear(nn.Module):
+    dtype = torch.float8_e4m3fn
+
+    def __init__(self, in_features, out_features, bias=False, dtype=None):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype or Linear.dtype))
+        if self.weight.element_size() == 1:
+            scale_out_features = (out_features + block_size - 1) // block_size
+            scale_in_features = (in_features + block_size - 1) // block_size
+            self.weight.scale = self.scale = nn.Parameter(torch.empty(scale_out_features, scale_in_features, dtype=torch.float32))
+        else:
+            self.register_parameter("scale", None)
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features))
+        else: 
+            self.register_parameter("bias", None)
+    
+    def forward(self, x):
+        return linear(x, self.weight, self.bias)
         
 class Gate(nn.Module):
 
@@ -142,9 +180,9 @@ class MLP(nn.Module):
     
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)
+        self.c_fc = Linear(config.n_embd, config.n_embd * 2)
         self.silu = nn.SiLU()
-        self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd)
+        self.c_proj = Linear(config.n_embd * 2, config.n_embd)
         self.c_proj.RESIDUAL_SCALE_INIT = 1
 
     def forward(self, x):
@@ -339,6 +377,6 @@ class CustomOptimizer(torch.optim.AdamW):
                             module.bias.data[i] -= self.bias_update_gamma
                         elif f_i_avg[i] < 1.0:
                             module.bias.data[i] += self.bias_update_gamma
-                    print(f_i_avg)
+                    # print(f_i_avg)
                     # zero out f_i
                     module.f_i_accum = None
