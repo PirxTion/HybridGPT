@@ -36,7 +36,9 @@ def linear(x, weight, bias):
         return y
 
 class Linear(nn.Module):
-    dtype = torch.float8_e4m3fn
+    # dtype = torch.float8_e5m2
+
+    dtype = torch.bfloat16
 
     def __init__(self, in_features, out_features, bias=False, dtype=None):
         super().__init__()
@@ -83,6 +85,7 @@ class Gate(nn.Module):
         f_i = (expert_counts.float() * self.n_routed_experts) / (self.n_activated_experts * T + 1e-6)
         if self.f_i_accum is None:
             self.f_i_accum = torch.zeros_like(f_i)
+            self.f_i_accum.requires_grad = False
         self.f_i_accum += f_i
         stats = {
             "f_i": f_i,
@@ -246,7 +249,7 @@ class GPT(nn.Module):
             #     std = 0.01
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
     
-    def configure_optimizers(self, weight_decay, learning_rate, device, grad_accum_steps, bias_update_gamma):
+    def configure_optimizers(self, weight_decay, learning_rate, device, grad_accum_steps, bias_update_gamma, master_process):
         # get all parameters that require gradients
         param_dict = {pn:p for pn, p in self.named_parameters()}
         param_dict = {pn:p for pn, p in param_dict.items() if p.requires_grad}
@@ -267,14 +270,14 @@ class GPT(nn.Module):
 
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-
-        print(f"number of weight decay parameters: {num_decay_params}")
-        print(f"number of no weight decay parameters: {num_nodecay_params}")
-
+        
         # create optimizer
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         used_fused = fused_available and device == 'cuda'
-        print(f"using fused AdamW: {used_fused}")
+        if master_process:
+            print(f"number of weight decay parameters: {num_decay_params}")
+            print(f"number of no weight decay parameters: {num_nodecay_params}") 
+            print(f"using fused AdamW: {used_fused}")
         optimizer = CustomOptimizer(
             model=self,  
             grad_accum_steps=grad_accum_steps,
