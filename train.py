@@ -79,6 +79,7 @@ if master_process:
 train_loader = DataLoaderLite(B, T, ddp_rank, ddp_world_size, master_process)
 
 for step in range(training_steps):
+    model.train()
     t0 = time.time()
     optimizer.zero_grad()
     loss_accum = 0.0
@@ -86,6 +87,8 @@ for step in range(training_steps):
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1)
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss, balance_loss = model(x, y)
         balance_loss = balance_loss / grad_accum_steps
@@ -93,17 +96,16 @@ for step in range(training_steps):
         loss_accum += loss.detach()
         balance_loss_accum += balance_loss.detach()
         loss += balance_loss
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps -1)
         loss.backward()
-        if ddp:
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-            dist.all_reduce(balance_loss_accum, op=dist.ReduceOp.AVG)
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+        dist.all_reduce(balance_loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     scheduler.step()
     lr = scheduler.get_last_lr()[0]
-    torch.cuda.synchronize() # wait for the GPU finish work
+    if device == "cuda":
+        torch.cuda.synchronize() # wait for the GPU finish work
     t1 = time.time()
     dt = t1-t0
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (t1-t0)
