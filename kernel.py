@@ -103,3 +103,44 @@ def fp8_gemm(a, a_s, b, b_s):
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']), triton.cdiv(N, META['BLOCK_SIZE_N']))
     fp8_gemm_kernel[grid](a, b, c, a_s, b_s, M, N, K)
     return c
+
+@triton.jit
+def rmsnorm_fwd_kernel(
+    X,
+    Y,
+    W,
+    Rstd,
+    stride_ml,
+    stride_n,
+    L,
+    N,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Setup for batched execution over M and L
+    row = tl.program_id(0)
+    batch = tl.program_id(1)
+
+    # Calculate the base index for the current matrix slice
+    base_idx = row * stride_ml + batch * stride_n
+    Y += base_idx
+    X += base_idx
+
+    _rms = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+    for off in range(0, N, BLOCK_SIZE):
+        cols = off + tl.arange(0, BLOCK_SIZE)
+        a = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
+        _rms += a * a
+    rms = tl.sqrt(tl.sum(_rms) / N + eps)
+
+    # Store the reciprocal of the standard deviation
+    tl.store(Rstd + row * L + batch, rms)
+
+    for off in range(0, N, BLOCK_SIZE):
+        cols = off + tl.arange(0, BLOCK_SIZE)
+        mask = cols < N
+        w = tl.load(W + cols, mask=mask)
+        x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
+        x_hat = x / rms
+        y = x_hat * W
+        tl.store(Y + cols, y, mask=mask)
