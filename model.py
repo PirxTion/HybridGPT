@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import inspect
 import numpy as np
-from kernel import act_quant, weight_dequant, fp8_gemm, RMSNormTritonAutogradFuncClass
+from kernel import RMSNormTritonAutogradFuncClass
 from typing import Literal
 
 gemm_impl: Literal["bf16", "fp8"] = "bf16"

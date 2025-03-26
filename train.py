@@ -2,9 +2,10 @@ import torch
 import torch.nn.functional as F
 from model import GPT, GPTConfig
 import time
-from transformers import get_cosine_schedule_with_warmup
-import os
 import math
+import os
+from functools import partial
+from torchao.float8 import convert_to_float8_training
 
 # DDP launch for e.g. 8 GPUs:
 # torchrun --standalone --nproc_per_node=2 train.py
@@ -39,8 +40,29 @@ else:
 from dataloader import DataLoaderLite
 torch.set_float32_matmul_precision('high')
 
-# model = GPT.from_pretrained('gpt2')
+def filter_linear_layers(module, fqn, first_layer_name=None, last_layer_name=None):
+    if isinstance(module, torch.nn.Linear):
+        if module.in_features % 16 != 0 or module.out_features % 16 != 0:
+            return False
+    # For stability reasons, we skip the first and last linear layers
+    # Otherwise can lead to the model not training or converging properly
+    if fqn in (first_layer_name, last_layer_name):
+        return False
+    return True
+
 model = GPT(GPTConfig(vocab_size=50304))
+first_linear = None
+last_linear = None
+for name, module in model.named_modules():
+    if isinstance(module, torch.nn.Linear):
+        if first_linear is None:
+            first_linear = name
+        last_linear = name
+
+func = partial(filter_linear_layers, first_layer_name=first_linear, last_layer_name=last_linear)
+
+convert_to_float8_training(model, module_filter_fn=func)
+
 model.to(device)
 model = torch.compile(model)
 if ddp:
@@ -108,9 +130,9 @@ for step in range(training_steps):
         balance_loss_accum += balance_loss.detach()
         loss += balance_loss
         loss.backward()
-    if ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-        dist.all_reduce(balance_loss_accum, op=dist.ReduceOp.AVG)
+    # if ddp:
+    #     dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+    #     dist.all_reduce(balance_loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration
     lr = get_lr(step)
