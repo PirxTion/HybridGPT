@@ -35,11 +35,6 @@ else:
         device = "mps"
     print(f"using device: {device}")
 
-
-# get tokenizer
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-
 from dataloader import DataLoaderLite
 torch.set_float32_matmul_precision('high')
 
@@ -54,7 +49,7 @@ if ddp:
 # optimize
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
+warmup_steps = 715
 training_steps = 50
 bias_update_gamma = 0.01
 
@@ -76,7 +71,7 @@ optimizer = raw_model.configure_optimizers(
 scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
 if master_process:
     print(f"total_batch_size: {total_batch_size} | B: {B} | T: {T} | grad_accum_steps: {grad_accum_steps}")
-train_loader = DataLoaderLite(B, T, ddp_rank, ddp_world_size, master_process)
+train_loader = DataLoaderLite(B, T, ddp_rank, ddp_world_size, master_process, split="train")
 
 for step in range(training_steps):
     model.train()

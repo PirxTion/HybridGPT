@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import inspect
 import numpy as np
-from kernel import act_quant, weight_dequant, fp8_gemm
+from kernel import act_quant, weight_dequant, fp8_gemm, RMSNormTritonAutogradFuncClass
 from typing import Literal
 
 gemm_impl: Literal["bf16", "fp8"] = "bf16"
@@ -21,6 +21,18 @@ class GPTConfig:
     n_activated_experts: int = 1
     n_routed_experts: int = 8
     load_balance_alpha =  0.0001
+
+class RMSNormTriton(torch.nn.Module):
+    def __init__(self, H):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(H)).to("cuda")
+
+    def forward(self, x):
+        return RMSNormTritonAutogradFuncClass.apply(x, self.weight)
+
+    @staticmethod
+    def apply(x, weight, eps=1e-5):
+        return RMSNormTritonAutogradFuncClass.apply(x, weight, eps)
 
 def linear(x, weight, bias):
     if weight.element_size() > 1:
