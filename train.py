@@ -4,6 +4,7 @@ from model import GPT, GPTConfig
 import time
 from transformers import get_cosine_schedule_with_warmup
 import os
+import math
 
 # DDP launch for e.g. 8 GPUs:
 # torchrun --standalone --nproc_per_node=2 train.py
@@ -50,6 +51,7 @@ if ddp:
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
+max_steps = 19073
 training_steps = 50
 bias_update_gamma = 0.01
 
@@ -68,9 +70,23 @@ optimizer = raw_model.configure_optimizers(
     bias_update_gamma=bias_update_gamma,
     master_process=master_process
     )
-scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
+
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
+
 if master_process:
     print(f"total_batch_size: {total_batch_size} | B: {B} | T: {T} | grad_accum_steps: {grad_accum_steps}")
+
 train_loader = DataLoaderLite(B, T, ddp_rank, ddp_world_size, master_process, split="train")
 
 for step in range(training_steps):
@@ -96,16 +112,18 @@ for step in range(training_steps):
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
         dist.all_reduce(balance_loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    # determine and set the learning rate for this iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
-    scheduler.step()
-    lr = scheduler.get_last_lr()[0]
     if device == "cuda":
         torch.cuda.synchronize() # wait for the GPU finish work
     t1 = time.time()
     dt = t1-t0
     tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size) / (t1-t0)
     if master_process:
-        print(f"step {step:4d} | loss: {loss_accum.item():.6f} | bl: {balance_loss_accum.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
+        print(f"step {step:5d} | loss: {loss_accum.item():.6f} | bl: {balance_loss_accum.item():.6f} | norm:{norm:.4f} | lr:{lr:.4e} | dt: {dt*1000:.2f}ms | tok/sec:{tokens_per_sec:.2f}")
 
 if ddp:
     destroy_process_group()
