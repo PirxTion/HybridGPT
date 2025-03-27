@@ -58,7 +58,6 @@ max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
 max_steps = 19073
-training_steps = 50
 bias_update_gamma = 0.01
 
 
@@ -97,7 +96,7 @@ log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
-for step in range(training_steps):
+for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
