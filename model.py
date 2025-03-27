@@ -112,7 +112,8 @@ class CausalSelfAttention(nn.Module):
     def reshape_for_broadcast(self, freqs_cis, x):
         ndim = x.ndim # x has shape (B, T, n_head, C // n_head)
         assert 0 <= 1 < ndim
-        assert freqs_cis.shape == (x.shape[1], x.shape[-1]) # match with T and hd
+        freqs_cis = freqs_cis[0:x.shape[1],:]
+        assert freqs_cis.shape == (x.shape[1], x.shape[-1]), f"x:{x.shape}, freqs_cis:{freqs_cis.shape}" # match with T and hd
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)] # shape is (1, T, 1, C // n_head)
         return freqs_cis.reshape(*shape)
     

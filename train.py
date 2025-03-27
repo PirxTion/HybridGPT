@@ -48,7 +48,7 @@ torch.set_float32_matmul_precision('high')
 # model = GPT.from_pretrained('gpt2')
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-model = torch.compile(model)
+# model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank], find_unused_parameters=True)
     raw_model = model.module if ddp else model
@@ -111,7 +111,7 @@ for step in range(max_steps):
                 x, y = val_loader.next_batch()
                 x, y = x.to(device), y.to(device)
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
+                    logits, loss, balance_loss = model(x, y)
                 loss = loss / val_loss_steps
                 val_loss_accum += loss.detach()
         if ddp:
@@ -148,7 +148,7 @@ for step in range(max_steps):
             # get the logits
             with torch.no_grad():
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(tokens)
+                    logits, loss, balance_loss = model(tokens)
                 pred_norm = get_most_likely_row(tokens, mask, logits)
             num_total += 1
             num_correct_norm += int(pred_norm == label)
