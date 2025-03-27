@@ -164,8 +164,8 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.ln_1 = RMSNormTriton(config.n_embd)
+        self.ln_2 = RMSNormTriton(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.moe = MoE(config)
         self.freqs_cis = self.precompute_freqs_cis(config.n_embd // config.n_head, config.block_size, config.rope_theta)
@@ -194,7 +194,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd), # input embedding
             # wpe = nn.Embedding(config.block_size, config.n_embd), # positional encoding
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # the transformer
-            ln_f = nn.LayerNorm(config.n_embd), # final layer norm
+            ln_f = RMSNormTriton(config.n_embd), # final layer norm
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # output embedding
 
