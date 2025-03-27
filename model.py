@@ -6,6 +6,7 @@ import inspect
 import numpy as np
 from kernel import RMSNormTritonAutogradFuncClass
 
+@dataclass
 class GPTConfig:
     block_size: int = 1024 # max sequence length
     vocab_size: int = 50257 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
