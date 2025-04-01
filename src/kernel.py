@@ -40,7 +40,7 @@ def rmsnorm_fwd_kernel(
         w = tl.load(W + cols, mask=mask)
         x = tl.load(X + cols, mask=mask, other=0.0).to(tl.float32)
         x_hat = x / rms
-        y = x_hat * W
+        y = x_hat * w
         tl.store(Y + cols, y, mask=mask)
 
 @triton.jit
